@@ -92,8 +92,11 @@ class Build(properties.PropertiesMixin):
     def setSlaveEnvironment(self, env):
         self.slaveEnvironment = env
 
-    def getSourceStamp(self):
-        return self.source
+    def getSourceStamp(self, repository=None):
+        if repository is None:
+            return self.source
+        assert (repository in self.sources)
+        return self.sources[repository]
 
     def allChanges(self):
         return self.source.changes
@@ -150,7 +153,7 @@ class Build(properties.PropertiesMixin):
 
         # start with global properties from the configuration
         buildmaster = self.builder.botmaster.parent
-        props.updateFromProperties(buildmaster.properties)
+        props.updateFromProperties(buildmaster.config.properties)
 
         # from the SourceStamp, which has properties via Change
         for change in self.source.changes:
@@ -178,7 +181,11 @@ class Build(properties.PropertiesMixin):
         buildslave_properties = slavebuilder.slave.properties
         self.getProperties().updateFromProperties(buildslave_properties)
         if slavebuilder.slave.slave_basedir:
-            self.setProperty("workdir", slavebuilder.slave.path_module.join(slavebuilder.slave.slave_basedir, self.builder.slavebuilddir), "slave")
+            self.setProperty("workdir",
+                    slavebuilder.slave.path_module.join(
+                        slavebuilder.slave.slave_basedir,
+                        self.builder.config.slavebuilddir),
+                    "slave")
 
         self.slavename = slavebuilder.slave.slavename
         self.build_status.setSlavename(self.slavename)

@@ -1,5 +1,7 @@
-The Buildbot Database
-=====================
+.. _developer-database:
+
+Database
+========
 
 As of version 0.8.0, Buildbot has used a database as part of its storage
 backend.  This section describes the database connector classes, which allow
@@ -114,10 +116,11 @@ buildrequests
         A build is considered completed if its ``complete`` column is 1; the
         ``complete_at`` column is not consulted.
 
-    .. py:method:: claimBuildRequests(brids)
+    .. py:method:: claimBuildRequests(brids[, claimed_at=XX])
 
         :param brids: ids of buildrequests to claim
         :type brids: list
+        :param datetime claimed_at: time at which the builds are claimed
         :returns: Deferred
         :raises: :py:exc:`AlreadyClaimedError`
 
@@ -126,6 +129,8 @@ buildrequests
         fail with :py:exc:`AlreadyClaimedError` if *any* of the build
         requests are already claimed by another master instance.  In this case,
         none of the claims will take effect.
+
+        If ``claimed_at`` is not given, then the current time will be used.
 
         As of 0.8.5, this method can no longer be used to re-claim build
         requests.  All given ID's must be unclaimed.  Use
@@ -139,7 +144,7 @@ buildrequests
             (e.g., SQLite), this method will not prevent claims for nonexistent
             build requests.  On database backends that do not support
             transactions (MySQL), this method will not properly roll back any
-            partial claims made before an :py:exc:`AlreadyClaimedError` was
+            partial claims made before an :py:exc:`AlreadyClaimedError` is
             generated.
 
     .. py:method:: reclaimBuildRequests(brids)
@@ -151,7 +156,7 @@ buildrequests
 
         Re-claim the given build requests, updating the timestamp, but checking
         that the requsts are owned by this master.  The resulting deferred will
-        fire normally on success, or fail with :py:exc:`AleadyClaimedError` if
+        fire normally on success, or fail with :py:exc:`AlreadyClaimedError` if
         *any* of the build requests are already claimed by another master
         instance, or don't exist.  In this case, none of the reclaims will take
         effect.
@@ -167,18 +172,20 @@ buildrequests
         not fail in this case.  The method does not check whether a request is
         completed.
 
-    .. py:method:: completeBuildRequests(brids, results)
+    .. py:method:: completeBuildRequests(brids, results[, complete_at=XX])
 
         :param brids: build request IDs to complete
         :type brids: integer
         :param results: integer result code
         :type results: integer
+        :param datetime complete_at: time at which the buildset was completed
         :returns: Deferred
         :raises: :py:exc:`NotClaimedError`
 
         Complete a set of build requests, all of which are owned by this master
         instance.  This will fail with :py:exc:`NotClaimedError` if the build
-        request is already completed or does not exist.
+        request is already completed or does not exist.  If ``complete_at`` is
+        not given, the current time will be used.
 
     .. py:method:: unclaimExpiredRequests(old)
 
@@ -280,16 +287,16 @@ buildsets
     * ``bsid``
     * ``external_idstring`` (arbitrary string for mapping builds externally)
     * ``reason`` (string; reason these builds were triggered)
-    * ``sourcestampid`` (source stamp for this buildset)
+    * ``sourcestampsetid`` (source stamp set for this buildset)
     * ``submitted_at`` (datetime object; time this buildset was created)
     * ``complete`` (boolean; true if all of the builds for this buildset are complete)
     * ``complete_at`` (datetime object; time this buildset was completed)
     * ``results`` (aggregate result of this buildset; see :ref:`Build-Result-Codes`)
 
-    .. py:method:: addBuildset(ssid, reason, properties, builderNames, external_idstring=None)
+    .. py:method:: addBuildset(sourcestampsetid, reason, properties, builderNames, external_idstring=None)
 
-        :param ssid: id of the SourceStamp for this buildset
-        :type ssid: integer
+        :param sourcestampsetid: id of the SourceStampSet for this buildset
+        :type sourcestampsetid: integer
         :param reason: reason for this buildset
         :type reason: short unicode string
         :param properties: properties for this buildset
@@ -308,17 +315,20 @@ buildsets
         inserted buildset ID and ``brids`` is a dictionary mapping buildernames
         to build request IDs.
 
-    .. py:method:: completeBuildset(bsid, results)
+    .. py:method:: completeBuildset(bsid, results[, complete_at=XX])
 
         :param bsid: buildset ID to complete
         :type bsid: integer
         :param results: integer result code
         :type results: integer
+        :param datetime complete_at: time the buildset was completed
         :returns: Deferred
-        :raises: :py:exc:`KeyError` if the buildset does not exist or is already complete
+        :raises: :py:exc:`KeyError` if the buildset does not exist or is
+            already complete
 
         Complete a buildset, marking it with the given ``results`` and setting
-        its ``completed_at`` to the current time.
+        its ``completed_at`` to the current time, if the ``complete_at``
+        argument is omitted.
 
     .. py:method:: getBuildset(bsid)
 
@@ -489,14 +499,14 @@ schedulers
 
     An instance of this class is available at ``master.db.changes``.
 
-    .. index:: schedulerid
+    .. index:: objectid
 
-    Schedulers are identified by a *schedulerid*, which can be determined from
-    the scheduler name and class by :py:meth:`getSchedulerId`.
+    Schedulers are identified by a their objectid - see
+    :py:class:`StateConnectorComponent`.
 
-    .. py:method:: classifyChanges(schedulerid, classifications)
+    .. py:method:: classifyChanges(objectid, classifications)
 
-        :param schedulerid: scheduler classifying the changes
+        :param objectid: scheduler classifying the changes
         :param classifications: mapping of changeid to boolean, where the boolean
             is true if the change is important, and false if it is unimportant
         :type classifications: dictionary
@@ -509,19 +519,19 @@ schedulers
         classifications once they are no longer needed, using
         :py:meth:`flushChangeClassifications`.
 
-    .. py:method: flushChangeClassifications(schedulerid, less_than=None)
+    .. py:method: flushChangeClassifications(objectid, less_than=None)
 
-        :param schedulerid: scheduler owning the flushed changes
+        :param objectid: scheduler owning the flushed changes
         :param less_than: (optional) lowest changeid that should *not* be flushed
         :returns: Deferred
 
         Flush all scheduler_changes for the given scheduler, limiting to those
         with changeid less than ``less_than`` if the parameter is supplied.
 
-    .. py:method:: getChangeClassifications(schedulerid[, branch])
+    .. py:method:: getChangeClassifications(objectid[, branch])
 
-        :param schedulerid: scheduler to look up changes for
-        :type schedulerid: integer
+        :param objectid: scheduler to look up changes for
+        :type objectid: integer
         :param branch: (optional) limit to changes with this branch
         :type branch: string or None (for default branch)
         :returns: dictionary via Deferred
@@ -535,19 +545,6 @@ schedulers
         default branch, and is not the same as omitting the ``branch`` argument
         altogether.
 
-    .. py:method:: getSchedulerId(sched_name, sched_class)
-
-        :param sched_name: the scheduler's configured name
-        :param sched_class: the class name of this scheduler
-        :returns: schedulerid, via a Deferred
-
-        Get the schedulerid for the given scheduler, creating a new id if no
-        matching record is found.
-
-        Note that this makes no attempt to "claim" the schedulerid: schedulers
-        with the same name and class, but running in different masters, will be
-        assigned the same schedulerid - with disastrous results.
-
 sourcestamps
 ~~~~~~~~~~~~
 
@@ -557,17 +554,19 @@ sourcestamps
 
 .. py:class:: SourceStampsConnectorComponent
 
-    This class manages source stamps, as stored in the database.  Source stamps
-    are linked to changes, and build sets link to source stamps, via their
-    id's.
+    This class manages source stamps, as stored in the database. Source stamps
+    are linked to changes. Source stamps with the same sourcestampsetid belong 
+    to the same sourcestampset. Buildsets link to one or more source stamps via 
+    a sourcestampset id.
 
     An instance of this class is available at ``master.db.sourcestamps``.
 
     .. index:: ssid, ssdict
 
-    Source stamps are identified by a *ssid*, and represented internally as an *ssdict*, with keys
+    Source stamps are identified by a *ssid*, and represented internally as a *ssdict*, with keys
 
     * ``ssid``
+    * ``sourcestampsetid`` (set to which the sourcestamp belongs)
     * ``branch`` (branch, or ``None`` for default branch)
     * ``revision`` (revision, or ``None`` to indicate the latest revision, in
       which case this is a relative source stamp)
@@ -623,6 +622,40 @@ sourcestamps
         Get an ssdict representing the given source stamp, or ``None`` if no
         such source stamp exists.
 
+    .. py:method:: getSourceStamps(sourcestampsetid)
+    
+        :param sourcestampsetid: identification of the set, all returned sourcestamps belong to this set
+        :type sourcestampsetid: integer
+        :returns: sslist of ssdict
+        
+        Get a set of sourcestamps identified by a set id. The set is returned as
+        a sslist that contains one or more sourcestamps (represented as ssdicts). 
+        The list is empty if the set does not exist or no sourcestamps belong to the set.
+    
+sourcestampset
+~~~~~~~~~~~~~~
+
+.. py:module:: buildbot.db.sourcestampsets
+
+.. index:: double: SourceStampSets; DB Connector Component
+
+.. py:class:: SourceStampSetsConnectorComponent
+
+    This class is responsible for adding new sourcestampsets to the database.
+    Build sets link to sourcestamp sets, via their (set) id's.
+    
+    An instance of this class is available at ``master.db.sourcestampsets``.
+    
+    Sourcestamp sets are identified by a sourcestampsetid.
+
+    .. py:method:: addSourceStampSet()
+    
+        :returns: new sourcestampsetid as integer, via Deferred
+        
+        Add a new (empty) sourcestampset to the database. The unique identification
+        of the set is returned as integer. The new id can be used to add
+        new sourcestamps to the database and as reference in a buildset.
+    
 state
 ~~~~~
 
@@ -941,7 +974,7 @@ handled through the model.
     ``master.db.model.buildrequests``, and columns are available in its ``c``
     attribute.
 
-    The source file, ``master/buildbot/db/model.py``, contains comments
+    The source file, :bb:src:`master/buildbot/db/model.py`, contains comments
     describing each table; that information is not replicated in this
     documentation.
 
@@ -1041,23 +1074,34 @@ To make a change to the schema, first consider how to handle any existing data.
 When adding new columns, this may not be necessary, but table refactorings can
 be complex and require caution so as not to lose information.
 
-Create a new script in ``master/buildbot/db/migrate/versions``, following the
-numbering scheme already present.  The script should have an ``update`` method,
-which takes an engine as a parameter, and ugprades the database, both changing
-the schema and performing any required data migrations.  The engine passed to
-this parameter is "enhanced" by SQLAlchemy-Migrate, with methods to handle
-adding, altering, and dropping columns.  See the SQLAlchemy-Migrate
+Create a new script in :bb:src:`master/buildbot/db/migrate/versions`, following
+the numbering scheme already present.  The script should have an ``update``
+method, which takes an engine as a parameter, and ugprades the database, both
+changing the schema and performing any required data migrations.  The engine
+passed to this parameter is "enhanced" by SQLAlchemy-Migrate, with methods to
+handle adding, altering, and dropping columns.  See the SQLAlchemy-Migrate
 documentation for details.
 
-Finally, modify ``master/buildbot/db/model.py`` to represent the updated
+Next, modify :bb:src:`master/buildbot/db/model.py` to represent the updated
 schema.  Buildbot's automated tests perform a rudimentary comparison of an
 upgraded database with the model, but it is important to check the details -
 key length, nullability, and so on can sometimes be missed by the checks.  If
 the schema and the upgrade scripts get out of sync, bizarre behavior can
 result.
 
-Finally, adjust the fake database table definitions in
-``master/buildbot/test/fake/fakedb.py`` according to your changes.
+Also, adjust the fake database table definitions in
+:bb:src:`master/buildbot/test/fake/fakedb.py` according to your changes.
+
+Your upgrade script should have unit tests.  The classes in
+:bb:src:`master/buildbot/test/util/migration.py` make this straightforward.
+Unit test scripts should be named e.g.,
+:file:`test_db_migrate_versions_015_remove_bad_master_objectid.py`.
+
+The :file:`master/buildbot/test/integration/test_upgrade.py` also tests
+upgrades, and will confirm that the resulting database matches the model.  If
+you encounter implicit indexes on MySQL, that do not appear on SQLite or
+Postgres, add them to ``implied_indexes`` in
+:file:`master/buidlbot/db/model.py`.
 
 Database Compatibility Notes
 ----------------------------
@@ -1079,6 +1123,8 @@ compatibility errors will be caught before a release.
 Index Length in MySQL
 ~~~~~~~~~~~~~~~~~~~~~
 
+.. index:: single: MySQL; limitations
+
 MySQL only supports about 330-character indexes.  The actual index length is
 1000 bytes, but MySQL uses 3-byte encoding for UTF8 strings.  This is a
 longstanding bug in MySQL - see `"Specified key was too long; max key
@@ -1092,6 +1138,8 @@ implementation requires a MyISAM storage engine.
 Transactions in MySQL
 ~~~~~~~~~~~~~~~~~~~~~
 
+.. index:: single: MySQL; limitations
+
 Unfortunately, use of the MyISAM storage engine precludes real transactions in
 MySQL.  ``transaction.commit()`` and ``transaction.rollback()`` are essentially
 no-ops: modifications to data in the database are visible to other users
@@ -1100,6 +1148,9 @@ immediately, and are not reverted in a rollback.
 Referential Integrity in SQLite and MySQL
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
+.. index:: single: SQLite; limitations
+.. index:: single: MySQL; limitations
+
 Neither MySQL nor SQLite enforce referential integrity based on foreign keys.
 Postgres does enforce, however.  If possible, test your changes on Postgres
 before committing, to check that tables are added and removed in the proper
@@ -1107,6 +1158,8 @@ order.
 
 Subqueries in MySQL
 ~~~~~~~~~~~~~~~~~~~
+
+.. index:: single: MySQL; limitations
 
 MySQL's query planner is easily confused by subqueries.  For example, a DELETE
 query specifying id's that are IN a subquery will not work.  The workaround is

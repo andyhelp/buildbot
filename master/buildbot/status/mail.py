@@ -26,8 +26,13 @@ import urllib
 
 from zope.interface import implements
 from twisted.internet import defer, reactor
-from twisted.mail.smtp import ESMTPSenderFactory
 from twisted.python import log as twlog
+
+try:
+    from twisted.mail.smtp import ESMTPSenderFactory
+    ESMTPSenderFactory = ESMTPSenderFactory # for pyflakes
+except ImportError:
+    ESMTPSenderFactory = None
 
 have_ssl = True
 try:
@@ -36,7 +41,7 @@ try:
 except ImportError:
     have_ssl = False
 
-from buildbot import interfaces, util
+from buildbot import interfaces, util, config
 from buildbot.process.users import users
 from buildbot.status import base
 from buildbot.status.results import FAILURE, SUCCESS, Results
@@ -44,6 +49,7 @@ from buildbot.status.results import FAILURE, SUCCESS, Results
 VALID_EMAIL = re.compile("[a-zA-Z0-9\.\_\%\-\+]+@[a-zA-Z0-9\.\_\%\-]+.[a-zA-Z]{2,6}")
 
 ENCODING = 'utf8'
+LOG_ENCODING = 'utf-8'
 
 class Domain(util.ComparableMixin):
     implements(interfaces.IEmailLookup)
@@ -279,22 +285,31 @@ class MailNotifier(base.StatusReceiverMultiService):
         @param smtpPort: The port that will be used when connecting to the
                          relayhost. Defaults to 25.
         """
-
         base.StatusReceiverMultiService.__init__(self)
-        assert isinstance(extraRecipients, (list, tuple))
-        for r in extraRecipients:
-            assert isinstance(r, str)
-            # require full email addresses, not User names
-            assert VALID_EMAIL.search(r), "%s is not a valid email" % r 
+
+        errors = []
+
+        if not isinstance(extraRecipients, (list, tuple)):
+            errors.append("extraRecipients must be a list or tuple")
+        else:
+            for r in extraRecipients:
+                if not isinstance(r, str) or not VALID_EMAIL.search(r):
+                    errors.append(
+                            "extra recipient %r is not a valid email" % (r,))
         self.extraRecipients = extraRecipients
         self.sendToInterestedUsers = sendToInterestedUsers
         self.fromaddr = fromaddr
-        assert mode in self.possible_modes
+        if mode not in self.possible_modes:
+            errors.append(
+                "mode %s is not one of %s" % (mode, self.possible_modes))
         self.mode = mode
         self.categories = categories
         self.builders = builders
         self.addLogs = addLogs
         self.relayhost = relayhost
+        if '\n' in subject:
+            errors.append(
+                'Newlines are not allowed in email subjects')
         self.subject = subject
         if lookup is not None:
             if type(lookup) is str:
@@ -304,7 +319,8 @@ class MailNotifier(base.StatusReceiverMultiService):
         self.customMesg = customMesg
         self.messageFormatter = messageFormatter
         if extraHeaders:
-            assert isinstance(extraHeaders, dict)
+            if not isinstance(extraHeaders, dict):
+                errors.append("extraHeaders must be a dictionary")
         self.extraHeaders = extraHeaders
         self.addPatch = addPatch
         self.useTls = useTls
@@ -318,28 +334,29 @@ class MailNotifier(base.StatusReceiverMultiService):
 
         # you should either limit on builders or categories, not both
         if self.builders != None and self.categories != None:
-            twlog.err("Please specify only builders or categories to include not both.")
-            raise interfaces.ParameterError("Please specify only builders or categories to include not both.")
+            errors.append(
+                "Please specify only builders or categories to include - " +
+                "not both.")
 
         if customMesg:
-            twlog.msg("customMesg is deprecated; please use messageFormatter instead")
+            errors.append(
+                "customMesg is deprecated; use messageFormatter instead")
+
+        if errors:
+            raise config.ConfigErrors(errors)
 
     def setServiceParent(self, parent):
         """
         @type  parent: L{buildbot.master.BuildMaster}
         """
         base.StatusReceiverMultiService.setServiceParent(self, parent)
-        self.setup()
-
-    def setup(self):
-        self.master_status = self.parent.getStatus()
+        self.master_status = self.parent
         self.master_status.subscribe(self)
-        
-            
+
     def startService(self):
         if self.buildSetSummary:
             self.buildSetSubscription = \
-            self.parent.subscribeToBuildsetCompletions(self.buildsetFinished)
+            self.master.subscribeToBuildsetCompletions(self.buildsetFinished)
  
         base.StatusReceiverMultiService.startService(self)
         
@@ -353,6 +370,7 @@ class MailNotifier(base.StatusReceiverMultiService):
 
     def disownServiceParent(self):
         self.master_status.unsubscribe(self)
+        self.master_status = None
         for w in self.watched:
             w.unsubscribe(self)
         return base.StatusReceiverMultiService.disownServiceParent(self)
@@ -417,7 +435,7 @@ class MailNotifier(base.StatusReceiverMultiService):
         for (builddictlist, builder) in zip(builddicts, builders):
                 for builddict in builddictlist:
                     build = builder.getBuild(builddict['number'])
-                    if self.isMailNeeded(build, build.results):
+                    if build is not None and self.isMailNeeded(build, build.results):
                         builds.append(build)
 
         self.buildMessage("Buildset Complete: " + buildset['reason'], builds,
@@ -528,6 +546,8 @@ class MailNotifier(base.StatusReceiverMultiService):
                                        'builder': builderName,
                                        }
 
+        assert '\n' not in subject, \
+            "Subject cannot contain newlines"
 
         assert type in ('plain', 'html'), \
             "'%s' message type must be 'plain' or 'html'." % type
@@ -555,7 +575,10 @@ class MailNotifier(base.StatusReceiverMultiService):
                                   log.getName())
                 if ( self._shouldAttachLog(log.getName()) or
                      self._shouldAttachLog(name) ):
-                    a = MIMEText(log.getText().encode(ENCODING), 
+                    text = log.getText()
+                    if not isinstance(text, unicode):
+                        text = text.decode(LOG_ENCODING)
+                    a = MIMEText(text.encode(ENCODING),
                                  _charset=ENCODING)
                     a.add_header('Content-Disposition', "attachment",
                                  filename=name)
@@ -565,18 +588,17 @@ class MailNotifier(base.StatusReceiverMultiService):
         # Add any extra headers that were requested, doing WithProperties
         # interpolation if only one build was given
         if self.extraHeaders:
-            for k,v in self.extraHeaders.items():
-                if len(builds) == 1:
-                    k = interfaces.IProperties(builds[0]).render(k)
+            if len(builds) == 1:
+                extraHeaders = builds[0].render(self.extraHeaders)
+            else:
+                extraHeaders = self.extraHeaders
+            for k,v in extraHeaders.items():
                 if k in m:
                     twlog.msg("Warning: Got header " + k +
                       " in self.extraHeaders "
                       "but it already exists in the Message - "
                       "not adding it.")
-                if len(builds) == 1:
-                    m[k] = interfaces.IProperties(builds[0]).render(v)
-                else:
-                    m[k] = v
+                m[k] = v
     
         return m
     
@@ -618,71 +640,76 @@ class MailNotifier(base.StatusReceiverMultiService):
                              results, builds, patches, logs)
 
         # now, who is this message going to?
-        self.dl = []
-        self.recipients = []
         if self.sendToInterestedUsers:
+            dl = []
             for build in builds:
-                d = defer.succeed(build)
                 if self.lookup:
-                    d.addCallback(self.useLookup)
+                    d = self.useLookup(build)
                 else:
-                    d.addCallback(self.useUsers)
+                    d = self.useUsers(build)
+                dl.append(d)
+            d = defer.gatherResults(dl)
         else:
-            d = defer.DeferredList(self.dl)
-        d.addCallback(self._gotRecipients, self.recipients, m)
+            d = defer.succeed([])
+        d.addCallback(self._gotRecipients, m)
         return d
 
     def useLookup(self, build):
+        dl = []
         for u in build.getInterestedUsers():
             d = defer.maybeDeferred(self.lookup.getAddress, u)
-            d.addCallback(self.recipients.append)
-            self.dl.append(d)
-        return defer.DeferredList(self.dl)
+            dl.append(d)
+        return defer.gatherResults(dl)
 
     def useUsers(self, build):
-        self.contacts = []
+        dl = []
         ss = build.getSourceStamp()
         for change in ss.changes:
             d = self.parent.db.changes.getChangeUids(change.number)
             def getContacts(uids):
                 def uidContactPair(contact, uid):
                     return (contact, uid)
-                d = defer.succeed(None)
+                contacts = []
                 for uid in uids:
-                    d.addCallback(lambda _ :
-                                     users.getUserContact(self.parent,
-                                                          contact_type='email',
-                                                          uid=uid))
+                    d = users.getUserContact(self.parent,
+                            contact_type='email',
+                            uid=uid)
                     d.addCallback(lambda contact: uidContactPair(contact, uid))
-                    d.addCallback(self.contacts.append)
-                return d
+                    contacts.append(d)
+                return defer.gatherResults(contacts)
             d.addCallback(getContacts)
-            def logNoMatch(_):
-                for pair in self.contacts:
+            def logNoMatch(contacts):
+                for pair in contacts:
                     contact, uid = pair
                     if contact is None:
                         twlog.msg("Unable to find email for uid: %r" % uid)
-                return [pair[0] for pair in self.contacts]
+                return [pair[0] for pair in contacts]
             d.addCallback(logNoMatch)
-            d.addCallback(self.recipients.extend)
-            def addOwners(_):
+            def addOwners(recipients):
                 owners = [e for e in build.getInterestedUsers()
                           if e not in build.getResponsibleUsers()]
-                self.recipients.extend(owners)
+                recipients.extend(owners)
+                return recipients
             d.addCallback(addOwners)
-            self.dl.append(d)
-        return defer.DeferredList(self.dl)
+            dl.append(d)
+        d = defer.gatherResults(dl)
+        @d.addCallback
+        def gatherRecipients(res):
+            recipients = []
+            map(recipients.extend, res)
+            return recipients
+        return d
 
     def _shouldAttachLog(self, logname):
         if type(self.addLogs) is bool:
             return self.addLogs
         return logname in self.addLogs
 
-    def _gotRecipients(self, res, rlist, m):
+    def _gotRecipients(self, rlist, m):
         to_recipients = set()
         cc_recipients = set()
 
-        for r in rlist:
+        for r in reduce(list.__add__, rlist, []):
             if r is None: # getAddress didn't like this address
                 continue
 
@@ -724,6 +751,9 @@ class MailNotifier(base.StatusReceiverMultiService):
         else:
             useAuth = False
         
+        if not ESMTPSenderFactory:
+            raise RuntimeError("twisted-mail is not installed - cannot "
+                               "send mail")
         sender_factory = ESMTPSenderFactory(
             self.smtpUser, self.smtpPassword,
             self.fromaddr, recipients, StringIO(s),

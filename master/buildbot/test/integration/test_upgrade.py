@@ -16,18 +16,18 @@
 import os
 import cPickle
 import tarfile
-import mock
 import shutil
 import textwrap
 from twisted.python import util
 from twisted.internet import defer
 from twisted.trial import unittest
 import sqlalchemy as sa
+from sqlalchemy.engine import reflection
 import migrate
 import migrate.versioning.api
 from migrate.versioning import schemadiff
 from buildbot.db import connector
-from buildbot.test.util import change_import, db, dirs
+from buildbot.test.util import change_import, db, querylog
 from buildbot.test.fake import fakemaster
 
 # monkey-patch for "compare_model_to_db gets confused by sqlite_sequence",
@@ -65,23 +65,36 @@ class UpgradeTestMixin(object):
     def setUpUpgradeTest(self):
         self.basedir = None
 
-        tarball = util.sibpath(__file__, self.source_tarball)
-        if not os.path.exists(tarball):
-            raise unittest.SkipTest(
-                "'%s' not found (normal when not building from Git)" % tarball)
+        if self.source_tarball:
+            tarball = util.sibpath(__file__, self.source_tarball)
+            if not os.path.exists(tarball):
+                raise unittest.SkipTest(
+                    "'%s' not found (normal when not building from Git)"
+                    % tarball)
 
-        tf = tarfile.open(tarball)
-        prefixes = set()
-        for inf in tf:
-            tf.extract(inf)
-            prefixes.add(inf.name.split('/', 1)[0])
-        # (note that tf.extractall isn't available in py2.4)
+            tf = tarfile.open(tarball)
+            prefixes = set()
+            for inf in tf:
+                tf.extract(inf)
+                prefixes.add(inf.name.split('/', 1)[0])
+            # (note that tf.extractall isn't available in py2.4)
 
-        # get the top-level dir from the tarball
-        assert len(prefixes) == 1, "tarball has multiple top-level dirs!"
-        self.basedir = prefixes.pop()
+            # get the top-level dir from the tarball
+            assert len(prefixes) == 1, "tarball has multiple top-level dirs!"
+            self.basedir = prefixes.pop()
+        else:
+            if not os.path.exists("basedir"):
+                os.makedirs("basedir")
+            self.basedir = os.path.abspath("basedir")
 
-        self.db = connector.DBConnector(mock.Mock(), self.db_url, self.basedir)
+        master = fakemaster.make_master()
+        master.config.db['db_url'] = self.db_url
+        self.db = connector.DBConnector(master, self.basedir)
+        d = self.db.setup(check_version=False)
+        @d.addCallback
+        def setup_logging(_):
+            querylog.log_from_engine(self.db.pool.engine)
+        return d
 
     def tearDownUpgradeTest(self):
         if self.basedir:
@@ -90,7 +103,7 @@ class UpgradeTestMixin(object):
     # save subclasses the trouble of calling our setUp and tearDown methods
 
     def setUp(self):
-        self.setUpUpgradeTest()
+        return self.setUpUpgradeTest()
 
     def tearDown(self):
         self.tearDownUpgradeTest()
@@ -107,11 +120,57 @@ class UpgradeTestMixin(object):
         self.patch(schemadiff, 'getDiffOfModelAgainstDatabase',
                                 getDiffMonkeyPatch)
         def comp(engine):
-            # get a fresh model/metadata
-            return migrate.versioning.api.compare_model_to_db(
+            # use compare_model_to_db, which gets everything but foreign
+            # keys and indexes
+            diff = migrate.versioning.api.compare_model_to_db(
                 engine,
                 self.db.model.repo_path,
                 self.db.model.metadata)
+            if diff:
+                return diff
+
+            # check indexes manually
+            insp = reflection.Inspector.from_engine(engine)
+            # unique, name, column_names
+            diff = []
+            for tbl in self.db.model.metadata.sorted_tables:
+                exp = sorted([
+                    dict(name=idx.name,
+                         unique=idx.unique and 1 or 0,
+                         column_names=sorted([ c.name for c in idx.columns ]))
+                    for idx in tbl.indexes ])
+
+                # include implied indexes on postgres and mysql
+                if engine.dialect.name == 'mysql':
+                    implied = [ idx for (tname, idx)
+                                in self.db.model.implied_indexes
+                                if tname == tbl.name ]
+                    exp = sorted(exp + implied)
+
+                got = sorted(insp.get_indexes(tbl.name))
+                if exp != got:
+                    got_names = set([ idx['name'] for idx in got ])
+                    exp_names = set([ idx['name'] for idx in exp ])
+                    got_info = dict( (idx['name'],idx) for idx in got )
+                    exp_info = dict( (idx['name'],idx) for idx in exp )
+                    for name in got_names - exp_names:
+                        diff.append("got unexpected index %s on table %s: %r"
+                                % (name, tbl.name, got_info[name]))
+                    for name in exp_names - got_names:
+                        diff.append("missing index %s on table %s"
+                                % (name, tbl.name))
+                    for name in got_names & exp_names:
+                        gi = dict(name=name,
+                            unique=got_info[name]['unique'] and 1 or 0,
+                            column_names=sorted(got_info[name]['column_names']))
+                        ei = exp_info[name]
+                        if gi != ei:
+                            diff.append(
+                                "index %s on table %s differs: got %s; exp %s"
+                                % (name, tbl.name, gi, ei))
+            if diff:
+                return "\n".join(diff)
+
         d = self.db.pool.do_with_engine(comp)
 
         # older sqlites cause failures in reflection, which manifest as a
@@ -123,6 +182,7 @@ class UpgradeTestMixin(object):
             raise unittest.SkipTest("model comparison skipped: bugs in schema "
                                     "reflection on this sqlite version")
         d.addErrback(catch_TypeError)
+
         def check(diff):
             if diff:
                 self.fail(str(diff))
@@ -139,23 +199,21 @@ class UpgradeTestMixin(object):
         return d
 
 
-class UpgradeTestEmpty(dirs.DirsMixin,
-                       UpgradeTestMixin,
-                       db.RealDatabaseMixin,
-                       unittest.TestCase):
+class UpgradeTestEmptyReal(UpgradeTestMixin, db.RealDatabaseMixin,
+                            unittest.TestCase):
+
+    # uses the real DB via RealDatabaseMixin
 
     def setUp(self):
-        self.basedir = os.path.abspath("basedir")
-        self.setUpDirs('basedir')
-        d = self.setUpRealDatabase()
-        def make_dbc(_):
-            self.db = connector.DBConnector(mock.Mock(), self.db_url, self.basedir)
-        d.addCallback(make_dbc)
+        d = self.setUpRealDatabase(sqlite_memory=False) # sets self.db_url
+        d.addCallback(lambda _ : self.setUpUpgradeTest())
         return d
 
     def tearDown(self):
-        self.tearDownDirs()
-        return self.tearDownRealDatabase()
+        d = self.tearDownRealDatabase()
+        @d.addCallback
+        def tear(_):
+            self.tearDownUpgradeTest()
 
     def test_emptydb_modelmatches(self):
         d = self.db.model.upgrade()
@@ -293,13 +351,13 @@ class UpgradeTestV082(UpgradeTestMixin, unittest.TestCase):
                       for brc in r.fetchall() ]
         objname = 'euclid:/home/dustin/code/buildbot/t/buildbot/sand27/master'
         self.assertEqual(buildreqs, [
-            (1, 1310337746, objname, 'BuildMaster'),
-            (2, 1310337757, objname, 'BuildMaster'),
-            (3, 1310337757, objname, 'BuildMaster'),
-            (4, 1310337757, objname, 'BuildMaster'),
-            (5, 1310337779, objname, 'BuildMaster'),
-            (6, 1310337779, objname, 'BuildMaster'),
-            (7, 1310337779, objname, 'BuildMaster'),
+            (1, 1310337746, objname, 'buildbot.master.BuildMaster'),
+            (2, 1310337757, objname, 'buildbot.master.BuildMaster'),
+            (3, 1310337757, objname, 'buildbot.master.BuildMaster'),
+            (4, 1310337757, objname, 'buildbot.master.BuildMaster'),
+            (5, 1310337779, objname, 'buildbot.master.BuildMaster'),
+            (6, 1310337779, objname, 'buildbot.master.BuildMaster'),
+            (7, 1310337779, objname, 'buildbot.master.BuildMaster'),
         ])
 
     def test_upgrade(self):
@@ -346,20 +404,20 @@ class UpgradeTestV083(UpgradeTestMixin, unittest.TestCase):
                       for brc in r.fetchall() ]
         objname = 'euclid:/home/dustin/code/buildbot/t/buildbot/sand27/master'
         self.assertEqual(buildreqs, [
-            (1, 1310326850, objname, 'BuildMaster'),
-            (2, 1310326862, objname, 'BuildMaster'),
-            (3, 1310326872, objname, 'BuildMaster'),
-            (4, 1310326872, objname, 'BuildMaster'),
-            (5, 1310326872, objname, 'BuildMaster'),
-            (6, 1310326872, objname, 'BuildMaster'),
-            (7, 1310326872, objname, 'BuildMaster'),
-            (8, 1310326872, objname, 'BuildMaster'),
-            (9, 1310326872, objname, 'BuildMaster'),
-            (10, 1310326872, objname, 'BuildMaster'),
-            (11, 1310326895, objname, 'BuildMaster'),
-            (12, 1310326900, objname, 'BuildMaster'),
-            (13, 1310326900, objname, 'BuildMaster'),
-            (14, 1310326900, objname, 'BuildMaster'),
+            (1, 1310326850, objname, 'buildbot.master.BuildMaster'),
+            (2, 1310326862, objname, 'buildbot.master.BuildMaster'),
+            (3, 1310326872, objname, 'buildbot.master.BuildMaster'),
+            (4, 1310326872, objname, 'buildbot.master.BuildMaster'),
+            (5, 1310326872, objname, 'buildbot.master.BuildMaster'),
+            (6, 1310326872, objname, 'buildbot.master.BuildMaster'),
+            (7, 1310326872, objname, 'buildbot.master.BuildMaster'),
+            (8, 1310326872, objname, 'buildbot.master.BuildMaster'),
+            (9, 1310326872, objname, 'buildbot.master.BuildMaster'),
+            (10, 1310326872, objname, 'buildbot.master.BuildMaster'),
+            (11, 1310326895, objname, 'buildbot.master.BuildMaster'),
+            (12, 1310326900, objname, 'buildbot.master.BuildMaster'),
+            (13, 1310326900, objname, 'buildbot.master.BuildMaster'),
+            (14, 1310326900, objname, 'buildbot.master.BuildMaster'),
         ])
 
     def test_upgrade(self):
@@ -399,11 +457,11 @@ class UpgradeTestV084(UpgradeTestMixin, unittest.TestCase):
                       for brc in r.fetchall() ]
         objname = 'euclid:/home/dustin/code/buildbot/t/buildbot/sand27/master'
         self.assertEqual(buildreqs, [
-            (1, 1310406744, objname, 'BuildMaster'),
-            (2, 1310406863, objname, 'BuildMaster'),
-            (3, 1310406863, objname, 'BuildMaster'),
-            (4, 1310406863, objname, 'BuildMaster'),
-            (5, 1310406863, objname, 'BuildMaster'),
+            (1, 1310406744, objname, 'buildbot.master.BuildMaster'),
+            (2, 1310406863, objname, 'buildbot.master.BuildMaster'),
+            (3, 1310406863, objname, 'buildbot.master.BuildMaster'),
+            (4, 1310406863, objname, 'buildbot.master.BuildMaster'),
+            (5, 1310406863, objname, 'buildbot.master.BuildMaster'),
             # 6, 7 aren't claimed yet
         ])
 
@@ -416,7 +474,8 @@ class TestWeirdChanges(change_import.ChangeImportMixin, unittest.TestCase):
         d = self.setUpChangeImport()
         def make_dbc(_):
             master = fakemaster.make_master()
-            self.db = connector.DBConnector(master, self.db_url, self.basedir)
+            self.db = connector.DBConnector(master, self.basedir)
+            return self.db.setup(check_version=False)
         d.addCallback(make_dbc)
         # note the connector isn't started, as we're testing upgrades
         return d
@@ -471,25 +530,6 @@ class TestWeirdChanges(change_import.ChangeImportMixin, unittest.TestCase):
         d.addCallback(check)
         return d
 
-    def testUpgradeChangeLinks(self):
-        # test importing complex properties
-        self.make_pickle(
-                self.make_change(
-                    who=u'author',
-                    comments='simple',
-                    files=['foo.c'],
-                    links=['http://buildbot.net', 'http://twistedmatrix.com'],
-                    revision='12345'))
-
-        d = self.db.model.upgrade()
-        d.addCallback(lambda _ : self.db.changes.getChange(1))
-        def check(c):
-            self.failIf(c is None)
-            self.assertEquals(sorted(c['links']),
-                    sorted(['http://buildbot.net', 'http://twistedmatrix.com']))
-        d.addCallback(check)
-        return d
-
     def testUpgradeChangeNoRevision(self):
         # test a change with no revision (which shouldn't be imported)
         self.make_pickle(
@@ -532,4 +572,4 @@ class TestPickles(unittest.TestCase):
                 Nsb.""")
         ss = cPickle.loads(pkl)
         self.assertTrue(ss.revision is None)
-        self.assertTrue(hasattr(ss, '_getSourceStampId_lock'))
+        self.assertTrue(hasattr(ss, '_getSourceStampSetId_lock'))

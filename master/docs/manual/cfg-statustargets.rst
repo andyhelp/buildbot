@@ -249,13 +249,12 @@ be used to access them.
     By adding one or more ``name=`` query arguments to the URL, the console view is
     restricted to only showing changes made by the given users.
     
-    NOTE: To use this page, your :file:`buildbot.css` file in :file:`public_html`
-    must be the one found in
-    :file:`master/buildbot/status/web/files/default.css`. This is the
-    default for new installs, but upgrades of very old installs of
-    Buildbot may need to manually fix the CSS file.
+    NOTE: To use this page, your :file:`buildbot.css` file in
+    :file:`public_html` must be the one found in
+    :bb:src:`master/buildbot/status/web/files/default.css`. This is the default
+    for new installs, but upgrades of very old installs of Buildbot may need to
+    manually fix the CSS file.
 
-    
     The console view is still in development. At this moment by
     default the view sorts revisions lexically, which can lead to odd
     behavior with non-integer revisions (e.g., git), or with integer
@@ -266,7 +265,6 @@ be used to access them.
     sorting revisions, although it depends on the date being set
     correctly in each commit::
 
-    
         w = html.WebStatus(http_port=8080, order_console_by_time=True)
 
 ``/rss``
@@ -410,6 +408,8 @@ supplies.  This is most often used to supply CSS files (:file:`/buildbot.css`)
 and a top-level navigational file (:file:`/index.html`), but can also serve any
 other files required - even build results!
 
+.. _Authorization:
+
 Authorization
 #############
 
@@ -451,7 +451,8 @@ authentication.  The actions are:
 
 For each of these actions, you can configure buildbot to never allow the
 action, always allow the action, allow the action to any authenticated user, or
-check with a function of your creation to determine whether the action is OK.
+check with a function of your creation to determine whether the action is OK
+(see below).
 
 This is all configured with the :class:`Authz` class::
 
@@ -462,8 +463,12 @@ This is all configured with the :class:`Authz` class::
         stopBuild=True)
     c['status'].append(WebStatus(http_port=8080, authz=authz))
 
-Each of the actions listed above is an option to :class:`Authz`.  You can specify
-``False`` (the default) to prohibit that action or ``True`` to enable it.
+Each of the actions listed above is an option to :class:`Authz`.  You can
+specify ``False`` (the default) to prohibit that action or ``True`` to enable
+it.  Or you can specify a callable.  Each such callable will take a username as
+its first argument.  The remaining arguments vary depending on the type of
+authorization request.  For ``forceBuild``, the second argument is the builder
+stsatus.
 
 Authentication
 ##############
@@ -562,10 +567,12 @@ in change comments.
 revlink
 '''''''
 
-The ``revlink`` is used to create links from revision IDs in the web
-status to a web-view of your source control system. The parameter's
-value must be a format string, a dict mapping a string (repository
-name) to format strings, or a callable.
+The ``revlink`` argument on :class:`WebStatus` is deprecated in favour of the
+global :bb:cfg:`revlink` option. Only use this if you need to generate
+different URLs for different web status instances.
+
+In addition to a callable like :bb:cfg:`revlink`, this argument accepts a
+format string or a dict mapping a string (repository name) to format strings.
 
 The format string should use ``%s`` to insert the revision id in the url.  For
 example, for Buildbot on GitHub::
@@ -573,15 +580,6 @@ example, for Buildbot on GitHub::
     revlink='http://github.com/buildbot/buildbot/tree/%s'
 
 The revision ID will be URL encoded before inserted in the replacement string
-
-The callable takes the revision id and repository argument, and should return
-an URL to the revision.  Note that the revision id may not always be in the
-form you expect, so code defensively.  In particular, a revision of "??" may be
-supplied when no other information is available.
-
-Note that :class:`SourceStamp`\s that are not created from version-control changes (e.g.,
-those created by a Nightly or Periodic scheduler) will have an empty repository
-string, as the respository is not known.
 
 changecommentlink
 '''''''''''''''''
@@ -636,7 +634,7 @@ Change Hooks
 
 The ``/change_hook`` url is a magic URL which will accept HTTP requests and translate
 them into changes for buildbot. Implementations (such as a trivial json-based endpoint
-and a GitHub implementation) can be found in :file:`master/buildbot/status/web/hooks`.
+and a GitHub implementation) can be found in :bb:src:`master/buildbot/status/web/hooks`.
 The format of the url is :samp:`/change_hook/{DIALECT}` where DIALECT is a package within the 
 hooks directory. Change_hook is disabled by default and each DIALECT has to be enabled
 separately, for security reasons
@@ -676,6 +674,40 @@ associated to the repository, append ``?project=name`` to the URL.
 Note that there is a standalone HTTP server available for receiving GitHub
 notifications, as well: :file:`contrib/github_buildbot.py`.  This script may be
 useful in cases where you cannot expose the WebStatus for public consumption.
+
+.. warning::
+
+    The incoming HTTP requests for this hook are not authenticated in
+    any way.  Anyone who can access the web status can "fake" a request from
+    GitHub, potentially causing the buildmaster to run arbitrary code.  See
+    :bb:bug:`2186` for work to fix this problem.
+
+Google Code hook
+################
+
+The Google Code hook is quite similar to the GitHub Hook. It has one option
+for the "Post-Commit Authentication Key" used to check if the request is
+legitimate::
+
+    c['status'].append(html.WebStatus(
+        …,
+        change_hook_dialects={'googlecode': {'secret_key': 'FSP3p-Ghdn4T0oqX'}}
+    ))
+
+This will add a "Post-Commit URL" for the project in the Google Code
+administrative interface, pointing to ``/change_hook/googlecode`` relative to
+the root of the web status.
+
+Alternatively, you can use the :ref:`GoogleCodeAtomPoller` :class:`ChangeSource`
+that periodically poll the Google Code commit feed for changes.
+
+.. note::
+
+   Google Code doesn't send the branch on which the changes were made. So, the
+   hook always returns ``'default'`` as the branch, you can override it with the
+   ``'branch'`` option::
+
+      change_hook_dialects={'googlecode': {'secret_key': 'FSP3p-Ghdn4T0oqX', 'branch': 'master'}}
 
 .. bb:status:: MailNotifier
 
@@ -780,7 +812,9 @@ containing the last 80 log lines of logs of the last build step is
 given below::
 
     from buildbot.status.builder import Results
-    
+
+    import cgi, datetime    
+
     def html_message_formatter(mode, name, build, results, master_status):
         """Provide a customized message to Buildbot's MailNotifier.
         
@@ -812,7 +846,6 @@ given below::
                 source += u" (plus patch)"
             if ss.patch_info: # add patch comment
                 source += u" (%s)" % ss.patch_info[1]
-                source +=
             text.append(u"<tr><td>Build Source Stamp:</td><td><b>%s</b></td></tr>" % source)
             text.append(u"<tr><td>Blamelist:</td><td>%s</td></tr>" % ",".join(build.getResponsibleUsers()))
             text.append(u'</table>')
@@ -868,7 +901,7 @@ given below::
                       sendToInterestedUsers=False,
                       mode='failing',
                       extraRecipients=['listaddr@example.org'],
-                      messageFormatter=message_formatter)
+                      messageFormatter=html_message_formatter)
 
 MailNotifier arguments
 ++++++++++++++++++++++
@@ -1098,6 +1131,7 @@ told to shut up. ::
 
     from buildbot.status import words
     irc = words.IRC("irc.example.org", "botnickname",
+                    useColors=False,
                     channels=[{"channel": "#example1"},
                               {"channel": "#example2",
                                "password": "somesecretpassword"}],
@@ -1119,6 +1153,9 @@ a different ``port`` number. Default value is 6667.
 To use the service, you address messages at the buildbot, either
 normally (``botnickname: status``) or with private messages
 (``/msg botnickname status``). The buildbot will respond in kind.
+
+The bot will add color to some of its messages. This is enabled by default,
+you might turn it off with ``useColors=False`` argument to words.IRC().
 
 If you issue a command that is currently not available, the buildbot
 will respond with an error message. If the ``noticeOnChannel=True``
@@ -1307,14 +1344,14 @@ GerritStatusPush
 
     from buildbot.status.status_gerrit import GerritStatusPush
 
-    def gerritReviewCB(builderName, build, result, arg):
+    def gerritReviewCB(builderName, build, result, status, arg):
         message =  "Buildbot finished compiling your patchset\n"
         message += "on configuration: %s\n" % builderName
         message += "The result is: %s\n" % Results[result].upper()
 
         if arg:
             message += "\nFor more details visit:\n"
-            message += "%sbuilders/%s/builds/%d\n" % (arg, builderName, build.getNumber())
+            message += status.getURLForThing(build) + "\n"
 
         # message, verified, reviewed
         return message, (result == 0 or -1), 0

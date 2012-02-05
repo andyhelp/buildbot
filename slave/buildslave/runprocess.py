@@ -128,7 +128,7 @@ class LogFileWatcher:
 
 if runtime.platformType == 'posix':
     class ProcGroupProcess(Process):
-        """Sumple subclass of Process to also make the spawned process a process
+        """Simple subclass of Process to also make the spawned process a process
         group leader, so we can kill all members of the process group."""
 
         def _setupChild(self, *args, **kwargs):
@@ -209,7 +209,7 @@ class RunProcess:
 
     notreally = False
     BACKUP_TIMEOUT = 5
-    KILL = "KILL"
+    interruptSignal = "KILL"
     CHUNK_LIMIT = 128*1024
 
     # Don't send any data until at least BUFFER_SIZE bytes have been collected
@@ -252,7 +252,6 @@ class RunProcess:
         """
 
         self.builder = builder
-        self.command = util.Obfuscated.get_real(command)
 
         # We need to take unicode commands and arguments and encode them using
         # the appropriate encoding for the slave.  This is mostly platform
@@ -264,14 +263,18 @@ class RunProcess:
         # spawnProcess which checks that arguments are regular strings or
         # unicode strings that can be encoded as ascii (which generates a
         # warning).
-        if isinstance(self.command, (tuple, list)):
-            for i, a in enumerate(self.command):
-                if isinstance(a, unicode):
-                    self.command[i] = a.encode(self.builder.unicode_encoding)
-        elif isinstance(self.command, unicode):
-            self.command = self.command.encode(self.builder.unicode_encoding)
+        def to_str(cmd):
+            if isinstance(cmd, (tuple, list)):
+                for i, a in enumerate(cmd):
+                    if isinstance(a, unicode):
+                        cmd[i] = a.encode(self.builder.unicode_encoding)
+            elif isinstance(cmd, unicode):
+                cmd = cmd.encode(self.builder.unicode_encoding)
+            return cmd
 
-        self.fake_command = util.Obfuscated.get_fake(command)
+        self.command = to_str(util.Obfuscated.get_real(command))
+        self.fake_command = to_str(util.Obfuscated.get_fake(command))
+
         self.sendStdout = sendStdout
         self.sendStderr = sendStderr
         self.sendRC = sendRC
@@ -737,10 +740,10 @@ class RunProcess:
 
         # try signalling the process group
         if not hit and self.useProcGroup and runtime.platformType == "posix":
-            sig = getattr(signal, "SIG"+ self.KILL, None)
+            sig = getattr(signal, "SIG"+ self.interruptSignal, None)
 
             if sig is None:
-                log.msg("signal module is missing SIG%s" % self.KILL)
+                log.msg("signal module is missing SIG%s" % self.interruptSignal)
             elif not hasattr(os, "kill"):
                 log.msg("os module is missing the 'kill' function")
             elif self.process.pgid is None:
@@ -761,8 +764,8 @@ class RunProcess:
                     pass
 
         elif runtime.platformType == "win32":
-            if self.KILL == None:
-                log.msg("self.KILL==None, only pretending to kill child")
+            if self.interruptSignal == None:
+                log.msg("self.interruptSignal==None, only pretending to kill child")
             else:
                 log.msg("using TASKKILL /F PID /T to kill pid %s" % self.process.pid)
                 subprocess.check_call("TASKKILL /F /PID %s /T" % self.process.pid)
@@ -772,9 +775,9 @@ class RunProcess:
         # try signalling the process itself (works on Windows too, sorta)
         if not hit:
             try:
-                log.msg("trying process.signalProcess('%s')" % (self.KILL,))
-                self.process.signalProcess(self.KILL)
-                log.msg(" signal %s sent successfully" % (self.KILL,))
+                log.msg("trying process.signalProcess('%s')" % (self.interruptSignal,))
+                self.process.signalProcess(self.interruptSignal)
+                log.msg(" signal %s sent successfully" % (self.interruptSignal,))
                 hit = 1
             except OSError:
                 log.err("from process.signalProcess:")

@@ -31,7 +31,8 @@ buildslave:
 
 Python: http://www.python.org
 
-  Buildbot requires python-2.4 or later.
+  Buildbot requires python-2.4 or later.  Buildbot versions later than 0.8.6
+  will require Python-2.5, and Python-2.7 is recommended.
 
 Twisted: http://twistedmatrix.com
 
@@ -60,6 +61,10 @@ Buildbot's windows testing is limited to the most recent Twisted and Python
 versions. For best results, use the most recent available versions of these
 libraries on Windows.
 
+Pywin32: http://sourceforge.net/projects/pywin32/
+
+  Twisted requires PyWin32 in order to spawn processes on Windows.
+
 .. _Buildmaster-Requirements:
 
 Buildmaster Requirements
@@ -67,9 +72,10 @@ Buildmaster Requirements
 
 sqlite3: http://www.sqlite.org
 
-  Buildbot requires SQLite to store its state.  Version 3.3.8 or higher is
-  recommended, as earlier versions had trouble with contention for database
-  tables.
+  Buildbot requires SQLite to store its state.  Version 3.7.0 or higher is
+  recommended, although Buildbot will run against earlier versions -- at the
+  risk of "Database is locked" errors.  The minimum version is 3.4.0, below
+  which parallel database queries and schema introspection fail.
 
 pysqlite: http://pypi.python.org/pypi/pysqlite
 
@@ -91,12 +97,12 @@ Jinja2: http://jinja.pocoo.org/
 
 SQLAlchemy: http://www.sqlalchemy.org/
 
-  Buildbot requires SQLAlchemy 0.6 or higher. SQLAlchemy allows Buildbot to
+  Buildbot requires SQLAlchemy 0.6.0 or higher. SQLAlchemy allows Buildbot to
   build database schemas and queries for a wide variety of database systems.
 
 SQLAlchemy-Migrate: http://code.google.com/p/sqlalchemy-migrate/
 
-  Buildbot requires one of the following SQLAlchemy-Migrate versions: 0.6.0,
+  Buildbot requires one of the following SQLAlchemy-Migrate versions:
   0.6.1, 0.7.0, and 0.7.1.  Sadly, Migrate's inter-version compatibility is not
   good, so other versions - newer or older - are unlikely to work correctly.
   Buildbot uses SQLAlchemy-Migrate to manage schema upgrades from version to
@@ -150,7 +156,7 @@ If the environment variable ``$NO_INSTALL_REQS`` is set to ``1``, then
 :file:`setup.py` will not try to install Buildbot's requirements.  This is
 usually only useful when building a Buildbot package.
 
-To test this, shift to a different directory (like :file:`/tmp`), and run::
+To test this, shift to a different directory (like :file:`/tmp`), and run:
 
 .. code-block:: bash
 
@@ -182,7 +188,7 @@ Running Buildbot's Tests (optional)
 -----------------------------------
 
 If you wish, you can run the buildbot unit test suite.  First, ensure you have
-the `mock <http://pypi.python.org/pypi/mock,mock>`_ Python module installed from
+the `mock <http://pypi.python.org/pypi/mock>`_ Python module installed from
 PyPi.  This module is not required for ordinary Buildbot operation - only to
 run the tests.  Note that this is not the same as the Fedora ``mock``
 package!  You can check with
@@ -199,7 +205,7 @@ Then, run the tests:
     # or
     PYTHONPATH=. trial buildslave.test
 
-Nothing should fail, a few might be skipped.
+Nothing should fail, although a few might be skipped.
 
 If any of the tests fail for reasons other than a missing ``mock``, you
 should stop and investigate the cause before continuing the installation
@@ -249,21 +255,36 @@ takes care of logging and daemonization (running the program in the
 background). :file:`/usr/bin/buildbot` is a front end which runs `twistd`
 for you.)
 
-In addition to :file:`buildbot.tac`, a small :file:`Makefile.sample` is
-installed. This can be used as the basis for customized daemon startup,
-:ref:`Launching-the-daemons`.
+Using A Database Server
+~~~~~~~~~~~~~~~~~~~~~~~
 
-Using MySQL
-~~~~~~~~~~~
+If you want to use a database server (e.g., MySQL or Postgres) as the database
+backend for your Buildbot, add the ``--db`` option to the ``create-master``
+invocation to specify the :ref:`connection string <Database-Specification>` for
+the database, and make sure that the same URL appears in the ``db_url`` of the
+:bb:cfg:`db` parameter in your configuration file.
 
-If you want to use MySQL as the database backend for your Buildbot, add the
-``--db`` option to the ``create-master`` invocation to specify the
-connection string for the :ref:`MySQL database <Database-Specification>`, and
-make sure that the same URL appears in the ``c['db_url']`` parameter in your
-configuration file.
+Additional Requirements
+'''''''''''''''''''''''
+
+Depending on the selected database, further Python packages will be required.
+Consult the SQLAlchemy dialect list for a full description.  The most common
+choice for MySQL is
+
+MySQL-python: http://mysql-python.sourceforge.net/
+
+  To communicate with MySQL, SQLAlchemy requires MySQL-python.  Any reasonably
+  recent version of MySQL-python should suffice.
+
+The most common choice for Postgres is
+
+Psycopg: http://initd.org/psycopg/
+
+    SQLAlchemy uses Psycopg to communicate with Postgres.  Any reasonably
+    recent version should suffice.
 
 Buildmaster Options
-'''''''''''''''''''
+~~~~~~~~~~~~~~~~~~~
 
 This section lists options to the ``create-master`` command.
 You can also type ``buildbot create-master --help`` for an up-to-the-moment summary.

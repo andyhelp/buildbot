@@ -18,6 +18,7 @@ from buildbot.process.properties import Properties
 from buildbot.schedulers.triggerable import Triggerable
 from twisted.python import log
 from twisted.internet import defer
+from buildbot import config
 
 class Trigger(LoggingBuildStep):
     name = "trigger"
@@ -30,13 +31,18 @@ class Trigger(LoggingBuildStep):
     def __init__(self, schedulerNames=[], sourceStamp=None, updateSourceStamp=None, alwaysUseLatest=False,
                  waitForFinish=False, set_properties={}, copy_properties=[], **kwargs):
         if not schedulerNames:
-            raise ValueError("You must specify a scheduler to trigger")
+            raise config.ConfigErrors([
+                "You must specify a scheduler to trigger" ])
         if sourceStamp and (updateSourceStamp is not None):
-            raise ValueError("You can't specify both sourceStamp and updateSourceStamp")
+            raise config.ConfigErrors([
+                "You can't specify both sourceStamp and updateSourceStamp" ])
         if sourceStamp and alwaysUseLatest:
-            raise ValueError("You can't specify both sourceStamp and alwaysUseLatest")
+            raise config.ConfigErrors([
+                "You can't specify both sourceStamp and alwaysUseLatest" ])
         if alwaysUseLatest and (updateSourceStamp is not None):
-            raise ValueError("You can't specify both alwaysUseLatest and updateSourceStamp")
+            raise config.ConfigErrors([
+                "You can't specify both alwaysUseLatest and updateSourceStamp"
+            ])
         self.schedulerNames = schedulerNames
         self.sourceStamp = sourceStamp
         if updateSourceStamp is not None:
@@ -116,7 +122,7 @@ class Trigger(LoggingBuildStep):
                 got = properties.getProperty('got_revision')
                 if got:
                     ss = ss.getAbsoluteSourceStamp(got)
-            d = ss.getSourceStampId(master)
+            d = ss.getSourceStampSetId(master)
         def start_builds(ssid):
             dl = []
             for scheduler in triggered_schedulers:
@@ -136,15 +142,49 @@ class Trigger(LoggingBuildStep):
         d.addCallback(start_builds)
 
         def cb(rclist):
-            result = SUCCESS
+            was_exception = was_failure = False
+            brids = {}
             for was_cb, results in rclist:
-                # TODO: make this algo more configurable
+                if isinstance(results, tuple):
+                    results, some_brids = results
+                    brids.update(some_brids)
+
                 if not was_cb:
-                    result = EXCEPTION
+                    was_exception = True
                     log.err(results)
-                    break
-                if results == FAILURE:
-                    result = FAILURE
+                    continue
+
+                if results==FAILURE:
+                    was_failure = True
+
+            if was_exception:
+                result = EXCEPTION
+            elif was_failure:
+                result = FAILURE
+            else:
+                result = SUCCESS
+
+            if brids:
+                def add_links(res):
+                    # reverse the dictionary lookup for brid to builder name
+                    brid_to_bn = dict((_brid,_bn) for _bn,_brid in brids.iteritems())
+
+                    for was_cb, builddicts in res:
+                        if was_cb:
+                            for build in builddicts:
+                                bn = brid_to_bn[build['brid']]
+                                num = build['number']
+                                
+                                url = master.status.getURLForBuild(bn, num)
+                                self.step_status.addURL("%s #%d" % (bn,num), url)
+                                
+                    return self.end(result)
+
+                builddicts = [master.db.builds.getBuildsForRequest(br) for br in brids.values()]
+                dl = defer.DeferredList(builddicts, consumeErrors=1)
+                dl.addCallback(add_links)
+                return dl
+
             return self.end(result)
         def eb(why):
             return self.end(FAILURE)

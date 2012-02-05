@@ -102,6 +102,18 @@ Arguments common to all :class:`BuildStep` subclasses:
     normally.  If you set ``doStepIf`` to a function, that function should
     accept one parameter, which will be the :class:`Step` object itself.
 
+.. index:: Buildstep Parameter; hideStepIf
+
+``hideStepIf``
+    A step can be optionally hidden from the waterfall and build details web pages.  To do
+    this, set the step's ``hideStepIf`` to a boolean value, or to a function that takes one
+    parameter, the :class:`BuildStepStatus` and returns a boolean value.  Steps are always
+    shown while they execute, however after the step as finished, this parameter
+    is evaluated (if a function) and if the value is True, the step is hidden.
+    For example, in order to hide the step if the step has been skipped, ::
+
+        factory.addStep(Foo(..., hideStepIf=lambda s, result: result==SKIPPED))
+
 .. index:: Buildstep Parameter; locks
 
 ``locks``
@@ -128,6 +140,16 @@ some of the classes have a bewildering array of options.
     stable yet. If you find any bugs please report them on the `Buildbot Trac
     <http://trac.buildbot.net/newticket>`_. The older Slave-side described source
     steps are :ref:`Source-Checkout-Slave-Side`.
+
+    The old source steps are imported like this::
+
+        from buildbot.steps.source import Git
+
+    while new source steps are in separate source-packages for each
+    version-control system::
+
+        from buildbot.steps.source.git import Git
+
 
 New users should, where possible, use the new implementations.  The old
 implementations will be deprecated in a later release.  Old users should take
@@ -182,8 +204,9 @@ parameters are mostly to specify where exactly the sources are coming from.
     outside of the workdir (like creating the workdir itself).
 
 ``alwaysUseLatest``
-    if True, bypass the usual ``update to the last Change`` behavior, and
-    always update to the latest changes instead.
+    if True, bypass the usual behavior of checking out the revision in the
+    source stamp, and always update to the latest revision in the repository
+    instead.
 
 ``retry``
     If set, this specifies a tuple of ``(delay, repeats)`` which means
@@ -197,38 +220,13 @@ parameters are mostly to specify where exactly the sources are coming from.
     The name of this parameter might vary depending on the Source step you
     are running. The concept explained here is common to all steps and
     applies to ``repourl`` as well as for ``baseURL`` (when
-    applicable). Buildbot, now being aware of the repository name via the
-    change source, might in some cases not need the repository URL. There
-    are multiple way to pass it through to this step, corresponding to
-    the type of the parameter given to this step:
+    applicable).
 
-    ``None``
-        In the case where no parameter is specified, the repository URL will
-        be taken directly from the Change attribute. This value should be used
-        if your ChangeSource step has all the information about how to reach
-        the Change.
-
-    string
-        The parameter might be a string. In this case, this string
-        will be used as the full repository URL. The value coming from
-        the ChangeSource step will be ignored.
-
-    format string
-        If the parameter is a string containing @code{%s}, then the
-        repository attribute from the Change will be substituted in
-        place of the ``%s``. This is usefull when the ChangeSource
-        step knows where the repository resides locally, but doesn't
-        know the scheme used to access it. For instance,
-        ``ssh://server/%s`` makes sense if the repository attribute is
-        the local path of the repository.
-
-    dict
-        In this case, the repository URL will be the value indexed by the
-        repository attribute in the dict given as parameter.
-
-    callable
-        The callable given as parameter will take the repository attribute from
-        the Change and its return value will be used as repository URL.
+    A common idiom is to pass ``Property('repository', 'url://default/repo/path')``
+    as repository. This grabs the repository from the source stamp of the
+    build. This can be a security issue, if you allow force builds from the
+    web, or have the :class:`WebStatus` change hooks enabled; as the buildslave
+    will download code from an arbitrary repository.
 
 ``timeout``
     Specifies the timeout for slave-side operations, in seconds.  If
@@ -531,6 +529,11 @@ should preferentially create the :bb:step:`SVN` step with the
       incremental. It performs all the incremental checkout behavior
       in ``source`` directory.
 
+   ``export``
+      Similar to ``method='copy'``, except using ``svn export`` to create build
+      directory so that there are no ``.svn`` directories in the build
+      directory.
+
 If you are using branches, you must also make sure your
 ``ChangeSource`` will report the correct branch names.
 
@@ -832,7 +835,7 @@ checkout or update. It takes the following arguments:
     ``:pserver:anonymous@cvs.sourceforge.net:/cvsroot/buildbot``
 
 ``cvsmodule``
-    (required): specify the cvs @code{module}, which is generally a
+    (required): specify the cvs ``module``, which is generally a
     subdirectory of the CVSROOT. The `cvsmodule` for the Buildbot source
     code is ``buildbot``.
 
@@ -912,7 +915,7 @@ should preferentially create the ``SVN`` step with the
     binary with a :option:`--username` option.
 
 ``password``
-    (optional): if specified, this will be passed to the @code{svn}
+    (optional): if specified, this will be passed to the ``svn``
     binary with a :option:`--password` option.  The password itself will be
     suitably obfuscated in the logs.
 
@@ -1152,8 +1155,8 @@ The ``Git`` step takes the following arguments:
     user/scheduler asks for a specific revision, this parameter is ignored.
 
 ``progress``
-    (optional): passes the (@code{--progress}) flag to (@code{git
-    fetch}). This solves issues of long fetches being killed due to
+    (optional): passes the (``--progress``) flag to (``git
+    fetch``). This solves issues of long fetches being killed due to
     lack of output, but requires Git 1.7.2 or later.
 
 This Source step integrates with :bb:chsrc:`GerritChangeSource`, and will automatically use
@@ -1296,6 +1299,9 @@ The :bb:step:`ShellCommand` arguments are:
     difficult questions about how to escape or interpret shell
     metacharacters.
 
+    If ``command`` contains nested lists (for example, from a properties
+    substitution), then that list will be flattened before it is executed.
+
 ``workdir``
     All ShellCommands are run by default in the ``workdir``, which
     defaults to the :file:`build` subdirectory of the slave builder's
@@ -1323,30 +1329,32 @@ The :bb:step:`ShellCommand` arguments are:
 
     These variable settings will override any existing ones in the
     buildslave's environment or the environment specified in the
-    :class:`Builder`. The exception is :envvar:`PYTHONPATH`, which is merged
-    with (actually prepended to) any existing :envvar:`PYTHONPATH` setting. The
-    value is treated as a list of directories to prepend, and a single
-    string is treated like a one-item list. For example, to prepend both
-    :file:`/usr/local/lib/python2.3` and :file:`/home/buildbot/lib/python`
-    to any existing :envvar:`PYTHONPATH` setting, you would do something like the
-    following::
-    
+    :class:`Builder`. The exception is :envvar:`PYTHONPATH`, which is
+    merged with (actually prepended to) any existing
+    :envvar:`PYTHONPATH` setting. the following example will prepend
+    :file:`/home/buildbot/lib/python` to any existing
+    :envvar:`PYTHONPATH`::
+
         from buildbot.steps.shell import ShellCommand
         f.addStep(ShellCommand(
                       command=["make", "test"],
-                      env={'PYTHONPATH': ["/usr/local/lib/python2.3",
-                                           "/home/buildbot/lib/python"] }))
+                      env={'PYTHONPATH': "/home/buildbot/lib/python"}))
+
+    To avoid the need of concatenating path together in the master
+    config file, if the value consist of an array, it will be joined
+    together using the right platform dependant separator.
     
     Those variables support expansion so that if you just want to prepend
     :file:`/home/buildbot/bin` to the :envvar:`PATH` environment variable, you can do
-    it by putting the value ``${PATH}`` at the end of the string like
+    it by putting the value ``${PATH}`` at the end of the value like
     in the example below. Variables that doesn't exists on the slave will be
     replaced by ``""``. ::
     
         from buildbot.steps.shell import ShellCommand
         f.addStep(ShellCommand(
                       command=["make", "test"],
-                      env={'PATH': "/home/buildbot/bin:${PATH}"}))
+                      env={'PATH': ["/home/buildbot/bin",
+                                    "${PATH}"]}))
 
 ``want_stdout``
     if ``False``, stdout from the child process is discarded rather than being
@@ -1465,6 +1473,12 @@ The :bb:step:`ShellCommand` arguments are:
     If this option is ``True`` (the default), then the step's logfile will describe the
     environment variables on the slave.  In situations where the environment is not
     relevant and is long, it may be easier to set ``logEnviron=False``.
+
+``interruptSignal``
+    If the command should be interrupted (either by buildmaster or timeout
+    etc.), what signal should be sent to the process, specified by name. By
+    default this is "KILL" (9). Specify "TERM" (15) to give the process a
+    chance to cleanup.  This functionality requires a 0.8.6 slave or newer.
 
 .. bb:step:: Configure
 
@@ -1852,6 +1866,18 @@ This command recursively deletes a directory on the slave. ::
 
 This step requires slave version 0.8.4 or later.
 
+.. bb:step:: MakeDirectory
+
+MakeDirectory
++++++++++++++++
+
+This command creates a directory on the slave. ::
+
+    from buildbot.steps.slave import MakeDirectory
+    f.addStep(MakeDirectory(dir="build/build"))
+
+This step requires slave version 0.8.5 or later.
+
 .. _Python-BuildSteps:
 
 Python BuildSteps
@@ -1938,7 +1964,7 @@ Generator. It uses `RestructuredText <http://docutils.sourceforge.net/rst.html>`
 as input format.
 
 The :bb:step:`Sphinx` step will run
-:program:`sphinx-build` or any other program spcified in its
+:program:`sphinx-build` or any other program specified in its
 ``sphinx`` argument and count the various warnings and error it
 detects. ::
 
@@ -2103,8 +2129,8 @@ status to the uploaded file. ::
     
     f.addStep(ShellCommand(command=["make", "docs"]))
     f.addStep(FileUpload(slavesrc="docs/reference.html",
-                         masterdest="~/public_html/ref.html",
-                         url="/~buildbot/ref.html"))
+                         masterdest="/home/bb/public_html/ref.html",
+                         url="http://somesite/~buildbot/ref.html"))
 
 The ``masterdest=`` argument will be passed to :meth:`os.path.expanduser`,
 so things like ``~`` will be expanded properly. Non-absolute paths
@@ -2393,9 +2419,10 @@ continually triggers itself, because the schedulers are specified
 by name.
 
 If ``waitForFinish`` is ``True``, then the step will not finish until
-all of the builds from the triggered schedulers have finished. If this
-argument is ``False`` (the default) or not given, then the buildstep
-succeeds immediately after triggering the schedulers.
+all of the builds from the triggered schedulers have finished. Hyperlinks
+are added to the waterfall and the build detail web pages for each
+triggered build. If this argument is ``False`` (the default) or not given,
+then the buildstep succeeds immediately after triggering the schedulers.
 
 The SourceStamp to use for the triggered build is controlled by the arguments
 ``updateSourceStamp``, ``alwaysUseLatest``, and ``sourceStamp``.  If

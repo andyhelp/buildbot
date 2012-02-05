@@ -27,7 +27,7 @@ from buildslave.test.util.misc import nl, BasedirMixin
 from buildslave.test.util import compat
 from buildslave.test.fake.slavebuilder import FakeSlaveBuilder
 from buildslave.exceptions import AbandonChain
-from buildslave import runprocess
+from buildslave import runprocess, util as bsutil
 
 def stdoutCommand(output):
     return [sys.executable, '-c', 'import sys; sys.stdout.write("%s\\n")' % output]
@@ -57,6 +57,26 @@ class TestRunProcess(BasedirMixin, unittest.TestCase):
 
     def tearDown(self):
         self.tearDownBasedir()
+
+    def testCommandEncoding(self):
+        b = FakeSlaveBuilder(False, self.basedir)
+        s = runprocess.RunProcess(b, u'abcd', self.basedir)
+        self.assertIsInstance(s.command, str)
+        self.assertIsInstance(s.fake_command, str)
+
+    def testCommandEncodingList(self):
+        b = FakeSlaveBuilder(False, self.basedir)
+        s = runprocess.RunProcess(b, [ u'abcd', 'efg' ], self.basedir)
+        self.assertIsInstance(s.command[0], str)
+        self.assertIsInstance(s.fake_command[0], str)
+
+    def testCommandEncodingObfuscated(self):
+        b = FakeSlaveBuilder(False, self.basedir)
+        s = runprocess.RunProcess(b,
+                        [ bsutil.Obfuscated(u'abcd', u'ABCD') ],
+                        self.basedir)
+        self.assertIsInstance(s.command[0], str)
+        self.assertIsInstance(s.fake_command[0], str)
 
     def testStart(self):
         b = FakeSlaveBuilder(False, self.basedir)
@@ -180,21 +200,26 @@ class TestRunProcess(BasedirMixin, unittest.TestCase):
         test_stdin_closed.skip = "not a POSIX platform"
 
     @compat.usesFlushLoggedErrors
-    def testBadCommand(self):
+    def test_startCommand_exception(self):
         b = FakeSlaveBuilder(False, self.basedir)
-        s = runprocess.RunProcess(b, ['command_that_doesnt_exist.exe'], self.basedir)
-        s.workdir = 1 # cause an exception
+        s = runprocess.RunProcess(b, ['whatever'], self.basedir)
+
+        # set up to cause an exception in _startCommand
+        def _startCommand(*args, **kwargs):
+            raise RuntimeError()
+        s._startCommand = _startCommand
+
         d = s.start()
         def check(err):
             err.trap(AbandonChain)
             stderr = []
             # Here we're checking that the exception starting up the command
-            # actually gets propogated back to the master.
+            # actually gets propogated back to the master in stderr.
             for u in b.updates:
                 if 'stderr' in u:
                     stderr.append(u['stderr'])
             stderr = "".join(stderr)
-            self.failUnless("TypeError" in stderr, stderr)
+            self.failUnless("RuntimeError" in stderr, stderr)
         d.addBoth(check)
         d.addBoth(lambda _ : self.flushLoggedErrors())
         return d
@@ -361,7 +386,11 @@ class TestPOSIXKilling(BasedirMixin, unittest.TestCase):
 
     # tests
 
-    def test_simple(self):
+    def test_simple_interruptSignal(self):
+        return self.test_simple('TERM')
+
+    def test_simple(self, interruptSignal=None):
+
         # test a simple process that just sleeps waiting to die
         pidfile = self.newPidfile()
         self.pid = None
@@ -370,6 +399,8 @@ class TestPOSIXKilling(BasedirMixin, unittest.TestCase):
         s = runprocess.RunProcess(b,
                 scriptCommand('write_pidfile_and_sleep', pidfile),
                 self.basedir)
+        if interruptSignal is not None:
+            s.interruptSignal = interruptSignal
         runproc_d = s.start()
 
         pidfile_d = self.waitForPidfile(pidfile)

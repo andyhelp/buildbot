@@ -75,12 +75,8 @@ class CVSMaildirSource(MaildirSource):
     name = "CVSMaildirSource"
 
     def __init__(self, maildir, prefix=None, category='',
-                 repository='', urlmaker=None, properties={}):
-        """If urlmaker is defined, it will be called with three arguments:
-        filename, previous version, new version. It returns a url for that
-        file."""
+                 repository='', properties={}):
         MaildirSource.__init__(self, maildir, prefix, category, repository)
-        self.urlmaker = urlmaker
         self.properties = properties
         
     def parse(self, m, prefix=None):
@@ -227,11 +223,7 @@ class CVSMaildirSource(MaildirSource):
             m = singleFileRE.match(fileList)
             if m:
                 curFile = path + '/' + m.group(1)
-                oldRev = m.group(2)
-                newRev = m.group(3)
                 files.append( curFile )
-                if self.urlmaker:
-                    links.append(self.urlmaker(curFile, oldRev, newRev ))
                 fileList = fileList[m.end():]
             else:
                 log.msg('CVSMaildirSource no files matched regex. Ignoring')
@@ -427,7 +419,7 @@ class BzrLaunchpadEmailMaildirSource(MaildirSource):
 
         # Put these into a dictionary, otherwise we cannot assign them
         # from nested function definitions.
-        d = { 'files': [], 'comments': "" }
+        d = { 'files': [], 'comments': u"" }
         gobbler = None
         rev = None
         who = None
@@ -450,7 +442,7 @@ class BzrLaunchpadEmailMaildirSource(MaildirSource):
         lines = list(body_line_iterator(m, True))
         rev = None
         while lines:
-            line = lines.pop(0)
+            line = unicode(lines.pop(0), "utf-8", errors="ignore")
 
             # revno: 101
             match = re.search(r"^revno: ([0-9.]+)", line)
